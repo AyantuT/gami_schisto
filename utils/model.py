@@ -1,126 +1,86 @@
 """
-model.py – Configurable CNN classifier for vegetation type prediction.
+Basic U-Net Architecture, can change the number of input channels and output classes to improve performance.
 
-Supports ResNet-18/50 and EfficientNet-B0 backbones with optional band
-count adaptation (so you can feed 1-band or 4-band rasters, not just RGB).
 """
-
 import torch
 import torch.nn as nn
-from torchvision import models
 
 
-def build_model(
-    backbone: str = "resnet50",
-    num_classes: int = 2,
-    pretrained: bool = True,
-    in_channels: int = 3,
-    dropout: float = 0.3,
-) -> nn.Module:
-    """
-    Parameters
-    ----------
-    backbone    : "resnet18" | "resnet50" | "efficientnet_b0"
-    num_classes : number of output classes (2 for emergent/submergent)
-    pretrained  : load ImageNet weights
-    in_channels : number of input spectral bands
-    dropout     : dropout before the final classifier head
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
 
-    Returns
-    -------
-    nn.Module ready for training
-    """
-    weights_arg = "DEFAULT" if pretrained else None
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
 
-    if backbone.startswith("resnet"):
-        model = _build_resnet(backbone, weights_arg, num_classes, in_channels, dropout)
-    elif backbone.startswith("efficientnet"):
-        model = _build_efficientnet(backbone, weights_arg, num_classes, in_channels, dropout)
-    else:
-        raise ValueError(f"Unknown backbone: {backbone}. Choose resnet18, resnet50, or efficientnet_b0.")
-
-    return model
-
-
-# ── backbone builders ─────────────────────────────────────────────────────────
-
-def _build_resnet(backbone, weights_arg, num_classes, in_channels, dropout):
-    if backbone == "resnet18":
-        model = models.resnet18(weights=weights_arg)
-    else:
-        model = models.resnet50(weights=weights_arg)
-
-    # Adapt first conv if band count != 3
-    if in_channels != 3:
-        old = model.conv1
-        model.conv1 = nn.Conv2d(
-            in_channels, old.out_channels,
-            kernel_size=old.kernel_size,
-            stride=old.stride,
-            padding=old.padding,
-            bias=False,
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
         )
-        # Initialise new weights: average pretrained RGB weights across bands
-        if weights_arg and in_channels != 3:
-            with torch.no_grad():
-                model.conv1.weight[:] = old.weight.mean(dim=1, keepdim=True).expand_as(model.conv1.weight)
 
-    # Replace classification head
-    in_feats = model.fc.in_features
-    model.fc = nn.Sequential(
-        nn.Dropout(dropout),
-        nn.Linear(in_feats, num_classes),
-    )
-    return model
+    def forward(self, x):
+        return self.conv(x)
 
 
-def _build_efficientnet(backbone, weights_arg, num_classes, in_channels, dropout):
-    model = models.efficientnet_b0(weights=weights_arg)
+class UNet(nn.Module):
+    def __init__(self, in_channels=3, num_classes=3):
+        super().__init__()
 
-    if in_channels != 3:
-        old = model.features[0][0]
-        model.features[0][0] = nn.Conv2d(
-            in_channels, old.out_channels,
-            kernel_size=old.kernel_size,
-            stride=old.stride,
-            padding=old.padding,
-            bias=False,
-        )
-        if weights_arg and in_channels != 3:
-            with torch.no_grad():
-                model.features[0][0].weight[:] = old.weight.mean(dim=1, keepdim=True).expand_as(
-                    model.features[0][0].weight
-                )
+        # Encoder
+        self.down1 = DoubleConv(in_channels, 64)
+        self.down2 = DoubleConv(64, 128)
+        self.down3 = DoubleConv(128, 256)
+        self.down4 = DoubleConv(256, 512)
 
-    in_feats = model.classifier[1].in_features
-    model.classifier = nn.Sequential(
-        nn.Dropout(dropout),
-        nn.Linear(in_feats, num_classes),
-    )
-    return model
+        self.pool = nn.MaxPool2d(2)
 
+        # Bottleneck
+        self.bottleneck = DoubleConv(512, 1024)
 
-# ── layer accessors (for GradCAM) ─────────────────────────────────────────────
+        # Decoder
+        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.conv4 = DoubleConv(1024, 512)
 
-def get_gradcam_layer(model: nn.Module, backbone: str) -> nn.Module:
-    """Return the last convolutional layer, which GradCAM hooks into."""
-    if backbone.startswith("resnet"):
-        return model.layer4[-1]
-    elif backbone.startswith("efficientnet"):
-        return model.features[-1]
-    raise ValueError(f"Unknown backbone: {backbone}")
+        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.conv3 = DoubleConv(512, 256)
 
+        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.conv2 = DoubleConv(256, 128)
 
-# ── freeze / unfreeze helpers ──────────────────────────────────────────────────
+        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.conv1 = DoubleConv(128, 64)
 
-def freeze_backbone(model: nn.Module, backbone: str):
-    """Freeze all parameters except the classification head."""
-    head_names = {"resnet18": "fc", "resnet50": "fc", "efficientnet_b0": "classifier"}
-    head = head_names.get(backbone, "fc")
-    for name, param in model.named_parameters():
-        param.requires_grad = name.startswith(head)
+        # Final prediction
+        self.output = nn.Conv2d(64, num_classes, kernel_size=1)
 
+    def forward(self, x):
 
-def unfreeze_all(model: nn.Module):
-    for param in model.parameters():
-        param.requires_grad = True
+        # Encoder
+        x1 = self.down1(x)
+        x2 = self.down2(self.pool(x1))
+        x3 = self.down3(self.pool(x2))
+        x4 = self.down4(self.pool(x3))
+
+        # Bottleneck
+        x5 = self.bottleneck(self.pool(x4))
+
+        # Decoder
+        x = self.up4(x5)
+        x = torch.cat([x, x4], dim=1)
+        x = self.conv4(x)
+
+        x = self.up3(x)
+        x = torch.cat([x, x3], dim=1)
+        x = self.conv3(x)
+
+        x = self.up2(x)
+        x = torch.cat([x, x2], dim=1)
+        x = self.conv2(x)
+
+        x = self.up1(x)
+        x = torch.cat([x, x1], dim=1)
+        x = self.conv1(x)
+
+        return self.output(x)
