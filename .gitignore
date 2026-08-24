@@ -1,0 +1,19 @@
+# Raw and processed data
+data/
+
+# Generated outputs
+outputs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.venv/
+
+# Mac system files
+.DS_Store
+
+# Secrets
+.env

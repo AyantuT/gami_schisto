@@ -1,0 +1,48 @@
+# ── Vegetation Classifier Config ──────────────────────────────────────────────
+data:
+  root_dir: "data/tiles"          # folder of .tif annotation files
+  class_map:                      # ArcGIS pixel values → class names
+    1: "emergent"
+    2: "submergent"
+  # How class label is determined from each tile:
+  #   "pixel_majority"  → read raster, take mode of non-zero pixels
+  #   "filename_prefix" → parse label from filename (needs label_regex below)
+  label_strategy: "pixel_majority"
+  label_regex: null               # e.g. "class(\\d+)_" if using filename_prefix
+  image_size: 224                 # resize tiles to this (px)
+  bands: [1, 2, 3]               # which raster bands to use (1-indexed); [1] for single-band
+  normalize_percentile: 2         # clip outlier pixel values at this percentile
+
+split:
+  train: 0.70
+  val:   0.15
+  test:  0.15
+  seed:  42
+  stratify: true
+
+model:
+  backbone: "resnet50"            # resnet18 | resnet50 | efficientnet_b0
+  pretrained: true
+  freeze_backbone_epochs: 3       # train only head for first N epochs, then unfreeze all
+  dropout: 0.3
+
+training:
+  epochs: 30
+  batch_size: 32
+  lr: 1e-4
+  weight_decay: 1e-4
+  scheduler: "cosine"            # cosine | step | none
+  early_stopping_patience: 7
+  mixed_precision: true          # AMP (set false if no CUDA)
+
+augmentation:
+  horizontal_flip: true
+  vertical_flip: true
+  rotate_degrees: 30
+  color_jitter: 0.2              # 0 = off
+  random_crop_scale: [0.8, 1.0]
+
+output:
+  checkpoint_dir: "outputs/checkpoints"
+  results_dir:    "outputs/results"
+  gradcam: true                  # generate GradCAM visualizations on test set
